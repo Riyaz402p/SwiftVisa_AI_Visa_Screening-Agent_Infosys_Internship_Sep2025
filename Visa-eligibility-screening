@@ -1,0 +1,223 @@
+
+generate_dataset.py
+
+import numpy as np
+import pandas as pd
+import random
+random.seed(42)
+np.random.seed(42)
+N = 10000
+def random_nationality():
+    return random.choice(['India','China','Nigeria','USA','UK','Pakistan','Brazil','Philippines'])
+def random_purpose():
+    return random.choice(['tourism','study','work','transit','family'])
+def random_education():
+    return random.choice(['none','highschool','bachelor','master','phd'])
+def generate_row():
+    age=np.random.randint(16,70)
+    nationality=random_nationality()
+    purpose=random_purpose()
+    education=random_education()
+    employment_years=max(0,int(np.random.normal(loc=5,scale=4)))
+    criminal_record=np.random.choice([0,1],p=[0.95,0.05])
+    previous_visas=np.random.poisson(0.8)
+    bank_balance_k=max(0,int(np.random.normal(loc=10,scale=8)))
+    sponsor_letter=np.random.choice([0,1],p=[0.7,0.3])
+    language_score=max(0,min(100,int(np.random.normal(loc=65,scale=20))))
+    intended_stay_months=int(np.random.exponential(scale=3))+1
+    score=0
+    if 18<=age<=60:score+=2
+    elif 16<=age<18 or 60<age<=68:score+=1
+    if education in('bachelor','master','phd'):score+=2
+    if employment_years>=2:score+=2
+    if employment_years==0 and purpose=='work':score-=2
+    if bank_balance_k>=5:score+=2
+    if sponsor_letter==1:score+=2
+    if bank_balance_k<1 and sponsor_letter==0:score-=2
+    if purpose in('study','work') and language_score>=50:score+=2
+    elif purpose in('study','work') and language_score<40:score-=2
+    if criminal_record==1:score-=5
+    if previous_visas>=1:score+=1
+    if purpose=='tourism' and intended_stay_months<=3:score+=1
+    if purpose=='transit' and intended_stay_months<=1:score+=1
+    if nationality in{'Nigeria','Pakistan'}:score-=1
+    score+=np.random.normal(0,1)
+    eligible=1 if score>=2 else 0
+    return{'age':age,'nationality':nationality,'purpose':purpose,'education':education,'employment_years':employment_years,'criminal_record':criminal_record,'previous_visas':previous_visas,'bank_balance_k':bank_balance_k,'sponsor_letter':sponsor_letter,'language_score':language_score,'intended_stay_months':intended_stay_months,'eligible':eligible}
+def generate_dataset(n=N,path='visa_dataset.csv'):
+    rows=[generate_row() for _ in range(n)]
+    df=pd.DataFrame(rows)
+    df=df.sample(frac=1,random_state=42).reset_index(drop=True)
+    df.to_csv(path,index=False)
+    print(f"Saved dataset with {len(df)} rows to {path}")
+if __name__=='__main__':
+    generate_dataset()
+
+
+
+train_model.py
+
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report,confusion_matrix,accuracy_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder,StandardScaler
+from sklearn.compose import ColumnTransformer
+import joblib
+DATA_PATH='visa_dataset.csv'
+MODEL_PATH='visa_model.joblib'
+def load_data(path=DATA_PATH):
+    return pd.read_csv(path)
+def build_pipeline(categorical_features,numerical_features):
+    cat=OneHotEncoder(handle_unknown='ignore',sparse=False)
+    num=StandardScaler()
+    pre=ColumnTransformer([('num',num,numerical_features),('cat',cat,categorical_features)],remainder='drop')
+    clf=RandomForestClassifier(n_estimators=200,random_state=42,class_weight='balanced')
+    return Pipeline([('preprocessor',pre),('clf',clf)])
+def main():
+    df=load_data()
+    X=df.drop(columns=['eligible'])
+    y=df['eligible']
+    num=['age','employment_years','previous_visas','bank_balance_k','language_score','intended_stay_months']
+    cat=['nationality','purpose','education','criminal_record','sponsor_letter']
+    X_train,X_test,y_train,y_test=train_test_split(X,y,test_size=0.2,random_state=42,stratify=y)
+    pipe=build_pipeline(cat,num)
+    pipe.fit(X_train,y_train)
+    y_pred=pipe.predict(X_test)
+    print("Accuracy:",accuracy_score(y_test,y_pred))
+    print(classification_report(y_test,y_pred))
+    print(confusion_matrix(y_test,y_pred))
+    joblib.dump(pipe,MODEL_PATH)
+    print(f"Saved model to {MODEL_PATH}")
+if __name__=='__main__':
+    main()
+
+
+
+inference_api.py
+
+from flask import Flask,request,jsonify
+import joblib,traceback,pandas as pd
+MODEL_PATH='visa_model.joblib'
+app=Flask(__name__)
+model=None
+def load_model():
+    global model
+    model=joblib.load(MODEL_PATH)
+@app.route('/')
+def index():
+    return"Visa Eligibility API"
+@app.route('/predict',methods=['POST'])
+def predict():
+    try:
+        data=request.get_json()
+        single=isinstance(data,dict)
+        df=pd.DataFrame([data]) if single else pd.DataFrame(data)
+        cols=['age','nationality','purpose','education','employment_years','criminal_record','previous_visas','bank_balance_k','sponsor_letter','language_score','intended_stay_months']
+        for c in cols:
+            if c not in df.columns:
+                df[c]=0
+        preds=model.predict(df[cols])
+        probs=model.predict_proba(df[cols]) if hasattr(model,"predict_proba") else None
+        out=[]
+        for i,p in enumerate(preds):
+            item={'eligible':int(p)}
+            if probs is not None:item['probability']=float(max(probs[i]))
+            out.append(item)
+        return jsonify(out[0] if single else out)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error':str(e)}),500
+if __name__=='__main__':
+    load_model()
+    app.run(host='0.0.0.0',port=5000,debug=True)
+
+
+
+explain.py
+
+import joblib,pandas as pd
+MODEL_PATH='visa_model.joblib'
+def feature_importances():
+    p=joblib.load(MODEL_PATH)
+    c=p.named_steps['clf']
+    pre=p.named_steps['preprocessor']
+    num=pre.transformers_[0][2]
+    ohe=pre.transformers_[1][1]
+    cat=pre.transformers_[1][2]
+    try:names=ohe.get_feature_names_out(cat)
+    except:names=cat
+    f=list(num)+list(names)
+    i=c.feature_importances_
+    df=pd.DataFrame({'feature':f,'importance':i}).sort_values('importance',ascending=False)
+    print(df.head(30))
+if __name__=='__main__':
+    feature_importances()
+
+
+---
+
+frontend.html
+
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Visa Eligibility Checker</title>
+<style>
+body{font-family:Arial,sans-serif;max-width:900px;margin:30px auto;padding:20px}
+label{display:block;margin-top:10px}
+input,select{padding:6px;width:100%;max-width:400px}
+button{margin-top:12px;padding:10px 14px}
+.result{margin-top:20px;padding:12px;border:1px solid #ddd}
+</style>
+</head>
+<body>
+<h2>Visa Eligibility Screening</h2>
+<label>Age<input id="age" value="28" type="number"/></label>
+<label>Nationality<select id="nationality"><option>India</option><option>China</option><option>Nigeria</option><option>USA</option><option>UK</option><option>Pakistan</option><option>Brazil</option><option>Philippines</option></select></label>
+<label>Purpose<select id="purpose"><option>tourism</option><option>study</option><option>work</option><option>transit</option><option>family</option></select></label>
+<label>Education<select id="education"><option>none</option><option>highschool</option><option>bachelor</option><option>master</option><option>phd</option></select></label>
+<label>Employment years<input id="employment_years" value="3" type="number"/></label>
+<label>Criminal record<select id="criminal_record"><option value="0">No</option><option value="1">Yes</option></select></label>
+<label>Previous visas<input id="previous_visas" value="1" type="number"/></label>
+<label>Bank balance (k)<input id="bank_balance_k" value="12" type="number"/></label>
+<label>Sponsor letter<select id="sponsor_letter"><option value="0">No</option><option value="1">Yes</option></select></label>
+<label>Language score<input id="language_score" value="70" type="number"/></label>
+<label>Intended stay months<input id="intended_stay_months" value="3" type="number"/></label>
+<button onclick="submit()">Check Eligibility</button>
+<div class="result" id="result"></div>
+<script>
+async function submit(){
+const payload={age:+age.value,nationality:nationality.value,purpose:purpose.value,education:education.value,employment_years:+employment_years.value,criminal_record:+criminal_record.value,previous_visas:+previous_visas.value,bank_balance_k:+bank_balance_k.value,sponsor_letter:+sponsor_letter.value,language_score:+language_score.value,intended_stay_months:+intended_stay_months.value}
+result.innerText="Checking..."
+try{
+const r=await fetch('http://127.0.0.1:5000/predict',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+const d=await r.json()
+result.innerText=JSON.stringify(d,null,2)
+}catch(e){result.innerText='Error: '+e.message}
+}
+</script>
+</body>
+</html>
+
+
+
+requirements.txt
+
+flask
+pandas
+numpy
+scikit-learn
+joblib
+
+
+ How to run:
+
+pip install -r requirements.txt
+python generate_dataset.py
+python train_model.py
+python inference_api.py
+
+
