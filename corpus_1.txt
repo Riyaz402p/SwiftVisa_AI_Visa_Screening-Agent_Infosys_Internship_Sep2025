@@ -1,0 +1,4 @@
+ apple mango fruit
+car bus vehicle
+apple car mango bus
+fruit vehicle
